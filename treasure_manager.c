@@ -9,7 +9,11 @@
 #include <time.h>
 
 #define TREASURE_FILE "treasures.dat"
+#define LOG_FILE "logged_hunt"
 #define PATH_MAX 4096
+
+//To do: Add a log where we save the commands used
+//To do: Add some better way of comunicating the commands the user can use (like a help command)
 
 struct coordinates {
     float latitude, longitude;
@@ -30,6 +34,22 @@ typedef struct treasure treasure_t;
  */
 void build_file_path(char *dest, const char *dir) {
     snprintf(dest, PATH_MAX, "%s/%s", dir, TREASURE_FILE);
+}
+
+void log_command(const char *command, const char *dir)
+{
+    char log_path[PATH_MAX];
+    snprintf(log_path, PATH_MAX, "%s/%s", dir, LOG_FILE);
+
+    int fl = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fl == -1) {
+        perror("Error opening log file");
+        exit(1);
+    }
+
+    write(fl, command, strlen(command));
+    write(fl, "\n", 1);
+    close(fl);
 }
 
 void add_treasure(const char *dir_name) {
@@ -274,12 +294,19 @@ void remove_hunt(const char *dir_name) {
 
     closedir(dir);
 
+    // Remove the symbolic link in the root directory
+    char link_name[PATH_MAX];
+    snprintf(link_name, PATH_MAX, "logged_hunt_%s", dir_name);
+    if (unlink(link_name) == -1) {
+        perror("Error removing symbolic link");
+    }
+
     if (rmdir(dir_name) == -1) {
         perror("Error removing directory");
         exit(1);
     }
 
-    printf("Hunt directory '%s' removed successfully.\n", dir_name);
+    printf("Hunt directory '%s' and its symbolic link removed successfully.\n", dir_name);
 }
 
 int main(int argc, char *argv[]) {
@@ -301,22 +328,55 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(command, "add") == 0) {
         add_treasure(directory);
+        char logged_command[100];
+        strcpy(logged_command,"add ");
+        strcat(logged_command, directory);
+        log_command(logged_command, directory);
+
+        // Create symbolic link to the logged_hunt file
+        char link_name[PATH_MAX];
+        snprintf(link_name, PATH_MAX, "logged_hunt_%s", directory);
+        char log_path[PATH_MAX];
+        snprintf(log_path, PATH_MAX, "%s/%s", directory, LOG_FILE);
+
+        if (symlink(log_path, link_name) == -1) {
+            perror("Error creating symbolic link");
+        } else {
+            printf("Symbolic link '%s' created successfully.\n", link_name);
+        }
     } else if (strcmp(command, "read") == 0) {
         read_treasure(directory);
+        char logged_command[100];
+        strcpy(logged_command,"read ");
+        strcat(logged_command, directory);
+        log_command(logged_command,directory);
     } else if (strcmp(command, "list") == 0) {
         list_treasure(directory);
+        char logged_command[100];
+        strcpy(logged_command,"list ");
+        strcat(logged_command, directory);
+        log_command(logged_command, directory);
     } else if (strcmp(command, "view") == 0) {
         if (argc != 4) {
             fprintf(stderr, "Usage: %s view <hunt_directory> <treasure_ID>\n", argv[0]);
             return 1;
         }
         view_treasure(directory, argv[3]);
+        char logged_command[100];
+        strcpy(logged_command,"view ");
+        strcat(logged_command, directory);
+        log_command(logged_command, directory);
     } else if(strcmp(command, "remove_treasure") == 0) {
         if (argc != 4) {
             fprintf(stderr, "Usage: %s remove_treasure <hunt_directory> <treasure_ID>\n", argv[0]);
             return 1;
         }
         delete(directory, argv[3]);
+        char logged_command[100];
+        strcpy(logged_command,"remove_treasure ");
+        strcat(logged_command, directory);
+        strcat(logged_command, argv[3]);
+        log_command(logged_command, directory);
     } else if(strcmp(command, "remove_hunt") == 0) {
         remove_hunt(directory);
     } else {
