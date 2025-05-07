@@ -8,11 +8,13 @@
 #include <sys/wait.h>
 #include <dirent.h>
 
+#define SIGUSR3 SIGRTMIN + 1
+
 int pid;
 char base_directory[256] = "/home/andrus/OS_project"; // Base directory for the monitor
 
-void handle_signal(int sig) {
-    if (sig == SIGUSR1) {
+void handle_signal_list_hunts(int sig) {
+    if (sig == SIGUSR3) {
         DIR *dir;
         struct dirent *entry;
 
@@ -21,24 +23,101 @@ void handle_signal(int sig) {
             exit(1);
         }
 
+        int total_treasures = 0;
         while ((entry = readdir(dir)) != NULL) {
             if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
-            pid_t child_pid = fork();
-            if (child_pid == 0) { // Child process
                 char path[512];
                 snprintf(path, sizeof(path), "%s/%s", base_directory, entry->d_name ? entry->d_name : "");
-                execlp("./treasure_manager", "treasure_manager", "list", path, (char *)NULL);
-                perror("execlp failed");
-                exit(1);
-            } else if (child_pid < 0) {
-                perror("Failed to fork");
-            } else {
-                wait(NULL); // Wait for the child process to complete
-            }
+                DIR *subdir = opendir(path);
+                if (subdir) {
+                    int count = 0;
+                    struct dirent *subentry;
+                    while ((subentry = readdir(subdir)) != NULL) {
+                        if (subentry->d_type == DT_REG && subentry->d_name[0] != '.') {
+                            count++;
+                        }
+                    }
+                    closedir(subdir);
+                    printf("Hunt: %s, Treasures: %d\n", entry->d_name, count);
+                    total_treasures += count;
+                }
             }
         }
 
+        printf("Total treasures: %d\n", total_treasures);
         closedir(dir);
+    }
+}
+
+void handle_signal_list_treasures(int sig) {
+    if (sig == SIGUSR1) {
+        char hunt_directory[256];
+        printf("Enter the hunt directory to list treasures: ");
+        if (scanf("%255s", hunt_directory) != 1) {
+            fprintf(stderr, "Error reading hunt directory\n");
+            return;
+        }
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", base_directory, hunt_directory);
+
+        DIR *dir = opendir(path);
+        if (dir == NULL) {
+            perror("Failed to open specified hunt directory");
+            return;
+        }
+        closedir(dir);
+
+        pid_t child_pid = fork();
+        if (child_pid == 0) { // Child process
+            execlp("./treasure_manager", "treasure_manager", "list", path, (char *)NULL);
+            perror("execlp failed");
+            exit(1);
+        } else if (child_pid < 0) {
+            perror("Failed to fork");
+        } else {
+            wait(NULL); // Wait for the child process to complete
+        }
+    }
+}
+
+void handle_signal_view_treasure(int sig) {
+    if (sig == SIGUSR2) {
+        char hunt_directory[256];
+        char treasure_id[256];
+
+        printf("Enter the hunt directory: ");
+        if (scanf("%255s", hunt_directory) != 1) {
+            fprintf(stderr, "Error reading hunt directory\n");
+            return;
+        }
+
+        printf("Enter the treasure ID: ");
+        if (scanf("%255s", treasure_id) != 1) {
+            fprintf(stderr, "Error reading treasure ID\n");
+            return;
+        }
+
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", base_directory, hunt_directory);
+
+        DIR *dir = opendir(path);
+        if (dir == NULL) {
+            perror("Failed to open specified hunt directory");
+            return;
+        }
+        closedir(dir);
+
+        pid_t child_pid = fork();
+        if (child_pid == 0) { // Child process
+            execlp("./treasure_manager", "treasure_manager", "view", path, treasure_id, (char *)NULL);
+            perror("execlp failed");
+            exit(1);
+        } else if (child_pid < 0) {
+            perror("Failed to fork");
+        } else {
+            wait(NULL); // Wait for the child process to complete
+        }
     }
 }
 
@@ -73,7 +152,26 @@ int main() {
                 exit(1);
             }
             if (pid == 0) {
-                signal(SIGUSR1, handle_signal);
+
+                struct sigaction list_treasures;
+                memset(&list_treasures, 0, sizeof(list_treasures));
+                list_treasures.sa_handler = handle_signal_list_treasures;
+                sigaction(SIGUSR1, &list_treasures, NULL);
+
+                struct sigaction view_treasure;
+                memset(&view_treasure, 0, sizeof(view_treasure));
+                view_treasure.sa_handler = handle_signal_view_treasure;
+                sigaction(SIGUSR2, &view_treasure, NULL);
+
+                struct sigaction list_hunts;
+                memset(&list_hunts, 0, sizeof(list_hunts));
+                list_hunts.sa_handler = handle_signal_list_hunts;
+                sigaction(SIGUSR3, &list_hunts, NULL);
+
+
+
+
+                //signal(SIGUSR1, handle_signal);
                 printf("Monitor process started. Waiting for signals...\n");
                 while (1) {
                     pause(); // Wait for signals
@@ -87,7 +185,10 @@ int main() {
                 printf("Monitor not started. Please start the monitor first.\n");
                 continue;
             }
-            printf("Listing hunts...\n");
+            printf("Sending signal to monitor to list hunts...\n");
+            if( kill(pid, SIGUSR3) != 0) {
+                perror("Failed to send signal to monitor");
+            }
         } else if (strcmp(command, "list_treasures") == 0) {
             if (!monitor_started) {
                 printf("Monitor not started. Please start the monitor first.\n");
@@ -97,12 +198,18 @@ int main() {
             if (kill(pid, SIGUSR1) != 0) {
                 perror("Failed to send signal to monitor");
             }
+            sleep(1); // Wait for the monitor to process the signal
         } else if (strcmp(command, "view_treasure") == 0) {
             if (!monitor_started) {
                 printf("Monitor not started. Please start the monitor first.\n");
                 continue;
             }
             printf("Viewing treasure...\n");
+            if(kill(pid, SIGUSR2) != 0 )
+            {
+                perror("Failed to send signal to monitor");
+            }
+            sleep(10); // you get 10 seconds to input the hunt directory in wich the treasure is you are looking for is
         } else if (strcmp(command, "stop_monitor") == 0) {
             if (!monitor_started) {
                 printf("Monitor is not even started. How would YOU close it?\n");
