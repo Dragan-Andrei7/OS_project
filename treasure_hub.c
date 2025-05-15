@@ -9,6 +9,7 @@
 #include <dirent.h>
 
 #define SIGUSR3 SIGRTMIN + 1
+#define SIGUSR4 SIGRTMIN + 2
 
 int pid;
 char base_directory[256] = "/home/andrus/OS_project"; // Base directory for the monitor
@@ -121,6 +122,38 @@ void handle_signal_view_treasure(int sig) {
     }
 }
 
+void handle_signal_calculate_score(int sig) {
+    if (sig == SIGUSR4) {
+        DIR *dir;
+        struct dirent *entry;
+
+        if ((dir = opendir(base_directory)) == NULL) {
+            perror("Failed to open base directory");
+            return;
+        }
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+                char hunt_path[512];
+                snprintf(hunt_path, sizeof(hunt_path), "%s/%s", base_directory, entry->d_name);
+
+                pid_t child_pid = fork();
+                if (child_pid == 0) { // Child process]
+                    printf("Calculating score for hunt: %s\n", entry->d_name);
+                    execlp("./calculate_score", "calculate_score", "Hunt1", (char*) NULL);
+                    perror("execlp failed");
+                    exit(1);
+                } else if (child_pid < 0) {
+                    perror("Failed to fork");
+                } else {
+                    wait(NULL); // Wait for the child process to complete
+                }
+            }
+        }
+        closedir(dir);
+    }
+
+}
 int main() {
     printf("Program started, use \'help\' if you need instructions on how to use it...\n");
 
@@ -135,10 +168,10 @@ int main() {
 
         if (strcmp(command, "help") == 0) {
             printf("Available commands:\n");
-            printf("start_monitor: Starts a separate background process that monitors the hunts and prints to the standard output information about them when asked to\n");
-            printf("list_hunts: Asks the monitor to list the hunts and the total number of treasures in each\n");
+            printf("start_monitor: Starts a separate background process that monitors the hunts and prints to the standard output information about them when ascalculate_score    calculate_scoret_hunts: Asks the monitor to list the hunts and the total number of treasures in each\n");
             printf("list_treasures: Tells the monitor to show the information about all treasures in a hunt, the same way as the command line at the previous stage did\n");
             printf("view_treasure: Tells the monitor to show the information about a treasure in hunt, the same way as the command line at the previous stage did\n");
+            printf("calculate_score: Tells the monitor to calculate the score of each user within every hunt  in the directory\n");
             printf("stop_monitor: Asks the monitor to end then returns to the prompt. Prints monitors termination state when it ends.\n");
             printf("exit: If the monitor still runs, prints an error message, otherwise ends the program\n");
         } else if (strcmp(command, "start_monitor") == 0) {
@@ -168,7 +201,10 @@ int main() {
                 list_hunts.sa_handler = handle_signal_list_hunts;
                 sigaction(SIGUSR3, &list_hunts, NULL);
 
-
+                struct sigaction calculate_score;
+                memset(&calculate_score, 0, sizeof(calculate_score));
+                calculate_score.sa_handler = handle_signal_calculate_score;
+                sigaction(SIGUSR4, &calculate_score, NULL);
 
 
                 //signal(SIGUSR1, handle_signal);
@@ -222,6 +258,15 @@ int main() {
                 perror("Failed to terminate monitor process");
             }
             monitor_started = false;
+        } else if (strcmp(command, "calculate_score") == 0) {
+            if (!monitor_started) {
+                printf("Monitor not started. Please start the monitor first.\n");
+                continue;
+            }
+            printf("Calculating scores...\n");
+            if (kill(pid, SIGUSR4) != 0) {
+                perror("Failed to send signal to monitor");
+            }
         } else if (strcmp(command, "exit") == 0) {
             if (monitor_started) {
                 printf("Monitor is still running. Please stop it before exiting.\n");

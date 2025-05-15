@@ -74,6 +74,7 @@ void print_scores() {
         free(users[i].username); // Free the allocated memory for username
     }
     free(users); // Free the users array
+    printf("\n");
 }
 
 
