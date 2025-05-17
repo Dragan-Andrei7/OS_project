@@ -13,6 +13,7 @@
 
 int pid;
 char base_directory[256] = "/home/andrus/OS_project"; // Base directory for the monitor
+int pipeCtoP[2];
 
 void handle_signal_list_hunts(int sig) {
     if (sig == SIGUSR3) {
@@ -52,6 +53,9 @@ void handle_signal_list_hunts(int sig) {
 
 void handle_signal_list_treasures(int sig) {
     if (sig == SIGUSR1) {
+
+        dup2(pipeCtoP[1],1); // Redirect stdout to the pipe
+
         char hunt_directory[256];
         printf("Enter the hunt directory to list treasures: ");
         if (scanf("%255s", hunt_directory) != 1) {
@@ -111,16 +115,25 @@ void handle_signal_view_treasure(int sig) {
 
         pid_t child_pid = fork();
         if (child_pid == 0) { // Child process
+            close(pipeCtoP[0]);                     // Close unused read end
+            dup2(pipeCtoP[1], STDOUT_FILENO);       // Redirect stdout to pipe
+            close(pipeCtoP[1]);                     // Close write end after dup
             execlp("./treasure_manager", "treasure_manager", "view", path, treasure_id, (char *)NULL);
             perror("execlp failed");
             exit(1);
         } else if (child_pid < 0) {
             perror("Failed to fork");
         } else {
-            wait(NULL); // Wait for the child process to complete
+            wait(NULL); // Wait for child to complete
         }
+
     }
 }
+
+// The main issue is that the parent (main process) waits to read from the pipe, but the monitor process (child) never closes the write end of the pipe, so the read blocks forever.
+// Solution: In the monitor process, close the write end of the pipe after finishing the output for each command (in the signal handler), and in the parent, re-open the pipe for each command if needed.
+// However, since the monitor is a long-running process, you can't close the pipe globally. Instead, you should flush and close the write end in the child process (the one that execs or prints), not in the monitor itself.
+// For commands that print directly from the monitor (not via fork/exec), you can use fflush(stdout) after writing to the pipe.
 
 void handle_signal_calculate_score(int sig) {
     if (sig == SIGUSR4) {
@@ -138,27 +151,38 @@ void handle_signal_calculate_score(int sig) {
                 snprintf(hunt_path, sizeof(hunt_path), "%s/%s", base_directory, entry->d_name);
 
                 pid_t child_pid = fork();
-                if (child_pid == 0) { // Child process]
-                    printf("Calculating score for hunt: %s\n", entry->d_name);
-                    execlp("./calculate_score", "calculate_score", "Hunt1", (char*) NULL);
+                if (child_pid == 0) { // In child
+                    close(pipeCtoP[0]); // Close unused read end
+                    dup2(pipeCtoP[1], STDOUT_FILENO); // Redirect stdout to pipe
+                    close(pipeCtoP[1]); // Close write end in child after dup
+                    execlp("./calculate_score", "calculate_score", entry->d_name, (char*) NULL);
                     perror("execlp failed");
                     exit(1);
                 } else if (child_pid < 0) {
                     perror("Failed to fork");
                 } else {
-                    wait(NULL); // Wait for the child process to complete
+                    wait(NULL); // Wait for this child to finish
                 }
             }
         }
-        closedir(dir);
-    }
 
+        closedir(dir);
+        // If you print anything directly here, flush stdout to ensure it's sent through the pipe
+        fflush(stdout);
+    }
 }
+
 int main() {
     printf("Program started, use \'help\' if you need instructions on how to use it...\n");
 
     char command[100];
     bool monitor_started = false;
+    char buffer[256];
+
+    if(pipe(pipeCtoP) == -1) {
+        perror("pipe");
+        return 1;
+    }
 
     while (1) {
         if (scanf("%s", command) != 1) {
@@ -168,7 +192,7 @@ int main() {
 
         if (strcmp(command, "help") == 0) {
             printf("Available commands:\n");
-            printf("start_monitor: Starts a separate background process that monitors the hunts and prints to the standard output information about them when ascalculate_score    calculate_scoret_hunts: Asks the monitor to list the hunts and the total number of treasures in each\n");
+            printf("start_monitor: Starts a separate background process that monitors everything\n");
             printf("list_treasures: Tells the monitor to show the information about all treasures in a hunt, the same way as the command line at the previous stage did\n");
             printf("view_treasure: Tells the monitor to show the information about a treasure in hunt, the same way as the command line at the previous stage did\n");
             printf("calculate_score: Tells the monitor to calculate the score of each user within every hunt  in the directory\n");
@@ -213,6 +237,7 @@ int main() {
                     pause(); // Wait for signals
                 }
             } else {
+                close(pipeCtoP[1]); // Close the write end of the pipe in the parent process 
                 monitor_started = true;
                 printf("Starting monitor...\n");
             }
@@ -224,6 +249,9 @@ int main() {
             printf("Sending signal to monitor to list hunts...\n");
             if( kill(pid, SIGUSR3) != 0) {
                 perror("Failed to send signal to monitor");
+            }
+            while(read(pipeCtoP[0], buffer, sizeof(buffer)) > 0) {
+                printf("%s", buffer);
             }
         } else if (strcmp(command, "list_treasures") == 0) {
             if (!monitor_started) {
@@ -241,11 +269,17 @@ int main() {
                 continue;
             }
             printf("Viewing treasure...\n");
-            if(kill(pid, SIGUSR2) != 0 )
-            {
+            if (kill(pid, SIGUSR2) != 0) {
                 perror("Failed to send signal to monitor");
             }
-            sleep(10); // you get 10 seconds to input the hunt directory in wich the treasure is you are looking for is
+
+            sleep(10); // Give the monitor time to prompt user and fork child
+
+            ssize_t bytes_read;
+            while ((bytes_read = read(pipeCtoP[0], buffer, sizeof(buffer) - 1)) > 0) {
+                buffer[bytes_read] = '\0'; // Null-terminate buffer
+                printf("%s", buffer);
+            }
         } else if (strcmp(command, "stop_monitor") == 0) {
             if (!monitor_started) {
                 printf("Monitor is not even started. How would YOU close it?\n");
@@ -264,8 +298,17 @@ int main() {
                 continue;
             }
             printf("Calculating scores...\n");
+
             if (kill(pid, SIGUSR4) != 0) {
                 perror("Failed to send signal to monitor");
+                continue;
+            }
+
+            // Read output from pipe
+            ssize_t nbytes;
+            while ((nbytes = read(pipeCtoP[0], buffer, sizeof(buffer) - 1)) > 0) {
+                buffer[nbytes] = '\0'; // Null-terminate
+                printf("%s", buffer);
             }
         } else if (strcmp(command, "exit") == 0) {
             if (monitor_started) {
