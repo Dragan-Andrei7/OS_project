@@ -12,6 +12,7 @@
 #define SIGUSR4 SIGRTMIN + 2
 
 int pid;
+int pid_printer;
 char base_directory[256] = "/home/andrus/OS_project"; // Base directory for the monitor
 int pipeCtoP[2];
 
@@ -19,6 +20,8 @@ void handle_signal_list_hunts(int sig) {
     if (sig == SIGUSR3) {
         DIR *dir;
         struct dirent *entry;
+        dup2(pipeCtoP[1], 1); // Redirect stdout to the pipe
+        close(pipeCtoP[0]); // Close unused read end
 
         if ((dir = opendir(base_directory)) == NULL) {
             perror("Failed to open directory");
@@ -54,14 +57,15 @@ void handle_signal_list_hunts(int sig) {
 void handle_signal_list_treasures(int sig) {
     if (sig == SIGUSR1) {
 
-        dup2(pipeCtoP[1],1); // Redirect stdout to the pipe
-
         char hunt_directory[256];
         printf("Enter the hunt directory to list treasures: ");
         if (scanf("%255s", hunt_directory) != 1) {
             fprintf(stderr, "Error reading hunt directory\n");
             return;
         }
+
+        dup2(pipeCtoP[1],1); // Redirect stdout to the pipe
+        close(pipeCtoP[0]); 
 
         char path[512];
         snprintf(path, sizeof(path), "%s/%s", base_directory, hunt_directory);
@@ -75,6 +79,7 @@ void handle_signal_list_treasures(int sig) {
 
         pid_t child_pid = fork();
         if (child_pid == 0) { // Child process
+            dup2(pipeCtoP[1], 1);
             execlp("./treasure_manager", "treasure_manager", "list", path, (char *)NULL);
             perror("execlp failed");
             exit(1);
@@ -130,11 +135,6 @@ void handle_signal_view_treasure(int sig) {
     }
 }
 
-// The main issue is that the parent (main process) waits to read from the pipe, but the monitor process (child) never closes the write end of the pipe, so the read blocks forever.
-// Solution: In the monitor process, close the write end of the pipe after finishing the output for each command (in the signal handler), and in the parent, re-open the pipe for each command if needed.
-// However, since the monitor is a long-running process, you can't close the pipe globally. Instead, you should flush and close the write end in the child process (the one that execs or prints), not in the monitor itself.
-// For commands that print directly from the monitor (not via fork/exec), you can use fflush(stdout) after writing to the pipe.
-
 void handle_signal_calculate_score(int sig) {
     if (sig == SIGUSR4) {
         DIR *dir;
@@ -153,8 +153,8 @@ void handle_signal_calculate_score(int sig) {
                 pid_t child_pid = fork();
                 if (child_pid == 0) { // In child
                     close(pipeCtoP[0]); // Close unused read end
-                    dup2(pipeCtoP[1], STDOUT_FILENO); // Redirect stdout to pipe
-                    close(pipeCtoP[1]); // Close write end in child after dup
+                    dup2(pipeCtoP[1], 1); // Redirect stdout to pipe
+                    close(pipeCtoP[1]); // Close write end of the pipe
                     execlp("./calculate_score", "calculate_score", entry->d_name, (char*) NULL);
                     perror("execlp failed");
                     exit(1);
@@ -167,9 +167,19 @@ void handle_signal_calculate_score(int sig) {
         }
 
         closedir(dir);
-        // If you print anything directly here, flush stdout to ensure it's sent through the pipe
-        fflush(stdout);
     }
+}
+
+void process_for_only_printing() {
+    close(pipeCtoP[1]); 
+    ssize_t bytes_read;
+    char buffer[256];
+    while ((bytes_read = read(pipeCtoP[0], buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytes_read] = '\0'; // Null-terminate buffer
+        printf("%s", buffer);
+    }
+    close(pipeCtoP[0]); // Close read end after reading
+    exit(0); // Exit the child process
 }
 
 int main() {
@@ -177,12 +187,21 @@ int main() {
 
     char command[100];
     bool monitor_started = false;
-    char buffer[256];
 
     if(pipe(pipeCtoP) == -1) {
         perror("pipe");
         return 1;
     }
+
+    pid_printer = fork();
+    if (pid < 0) {
+        perror("Error creating process");
+        exit(1);
+    }
+    if (pid_printer == 0) {
+        // Child process
+        process_for_only_printing();
+    } 
 
     while (1) {
         if (scanf("%s", command) != 1) {
@@ -250,9 +269,6 @@ int main() {
             if( kill(pid, SIGUSR3) != 0) {
                 perror("Failed to send signal to monitor");
             }
-            while(read(pipeCtoP[0], buffer, sizeof(buffer)) > 0) {
-                printf("%s", buffer);
-            }
         } else if (strcmp(command, "list_treasures") == 0) {
             if (!monitor_started) {
                 printf("Monitor not started. Please start the monitor first.\n");
@@ -275,11 +291,6 @@ int main() {
 
             sleep(10); // Give the monitor time to prompt user and fork child
 
-            ssize_t bytes_read;
-            while ((bytes_read = read(pipeCtoP[0], buffer, sizeof(buffer) - 1)) > 0) {
-                buffer[bytes_read] = '\0'; // Null-terminate buffer
-                printf("%s", buffer);
-            }
         } else if (strcmp(command, "stop_monitor") == 0) {
             if (!monitor_started) {
                 printf("Monitor is not even started. How would YOU close it?\n");
@@ -304,12 +315,6 @@ int main() {
                 continue;
             }
 
-            // Read output from pipe
-            ssize_t nbytes;
-            while ((nbytes = read(pipeCtoP[0], buffer, sizeof(buffer) - 1)) > 0) {
-                buffer[nbytes] = '\0'; // Null-terminate
-                printf("%s", buffer);
-            }
         } else if (strcmp(command, "exit") == 0) {
             if (monitor_started) {
                 printf("Monitor is still running. Please stop it before exiting.\n");
